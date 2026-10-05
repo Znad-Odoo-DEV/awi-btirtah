@@ -14,7 +14,8 @@ py -m http.server 5173
 ```
 
 - `?debug=1`: لوحة لمعايرة خط الفك ومكان الفم لكل وجه. انسخ القيم اللي بتطلع لـ`src/config.js`.
-- `?local=1`: بيجبر الموقع على الوضع المحلي حتى لو مفاتيح Firebase موجودة.
+- `?api=http://127.0.0.1:8787`: بيربط الموقع بالسيرفر المحلي (`wrangler dev`).
+- `?local=1`: بيجبر الموقع على الوضع المحلي، والأرقام بتضل بالمتصفح بس.
 
 ## الملفات
 
@@ -24,11 +25,11 @@ py -m http.server 5173
 | `src/main.js` | الحالة، الإدخال (ماوس، لمس متعدد، كيبورد)، والعدّادات |
 | `src/face.js` | حركة الفك: تقسيم الصورة عند خط الفك، squash & stretch، ولوحة الـdebug |
 | `src/audio.js` | صوت النبحة: AudioBuffer محمّل مسبقاً، وطبقة الصوت بتتغيّر ±10% بكل كبسة |
-| `src/sync.js` | تجميع الكبسات وإرسالها كل ٣ ثواني، والوضع المحلي (localStorage + BroadcastChannel) |
-| `src/firebase.js` | الاتصال بـFirebase Realtime Database، وبينحمّل بس إذا المفاتيح موجودة |
+| `src/sync.js` | تجميع الكبسات وإرسالها كل ٣ ثواني، والوضع المحلي إذا ما في API (localStorage + BroadcastChannel) |
+| `src/api.js` | الاتصال بالـWorker: WebSocket للأرقام اللحظية، و POST/sendBeacon لإرسال الكبسات |
+| `worker/` | السيرفر: Cloudflare Worker + Durable Object (SQLite)، مع اختباراته |
 | `src/leaderboard.js` | ترتيب المحافظات مع أنيميشن تبديل المراكز |
-| `src/config.js` | **كل الإعدادات:** مفاتيح Firebase، الشخصيات، والمحافظات |
-| `database.rules.json` | قواعد الأمان |
+| `src/config.js` | **كل الإعدادات:** عنوان الـAPI، الشخصيات، والمحافظات |
 | `scripts/process-faces.py` | قص الوجوه: إزالة الخلفية (rembg)، كشف الوجه (OpenCV)، وتصدير WebP و PNG |
 | `scripts/extract-bark.py` | قص نبحة وحدة من ملف الصوت الأصلي |
 
@@ -40,35 +41,59 @@ py -m http.server 5173
    py -3.11 scripts/process-faces.py
    ```
 2. ضيف الشخصية لـ`CHARACTERS` بـ`src/config.js`.
-3. ضيف الـslug لقائمة الشخصيات المسموحة بـ`database.rules.json`، بمكانين: `characters` و `matrix`.
+3. ضيف الـslug لـ`CHARACTERS` بـ`worker/src/index.js`، وبعدين اعمل `npx wrangler deploy` من `worker/`.
 
-## Firebase: لترتيب عالمي مشترك بين كل الزوار
+## السيرفر: ترتيب مشترك بين كل الزوار
 
-بدون مفاتيح، الموقع بيشتغل **محلياً**: الأرقام محفوظة على جهاز كل زائر لحاله، والنقطة الرمادية بالشريط تحت بتدل على هالوضع.
+الأرقام المشتركة بتشتغل على **Cloudflare Worker مع Durable Object واحد**، والكود بـ`worker/`:
 
-لتفعيل الترتيب المشترك:
+- **عنوان الـAPI:** `https://awi-btirtah-api.znad.workers.dev`
+- **`GET /totals`:** المجاميع كلها.
+- **`POST /flush`:** دفعة كبسات، بالشكل `{"batch":[["gov|char", n], ...]}`. بتنبعت كـ`text/plain` لحتى ما يصير CORS preflight، ولحتى يشتغل `sendBeacon` وقت سكرة الصفحة.
+- **`GET /ws`:** WebSocket، السيرفر بيبعت المجاميع الجديدة لكل الزوار (مرة بالثانية كحد أقصى).
 
-1. افتح [console.firebase.google.com](https://console.firebase.google.com) وأنشئ مشروع جديد.
-2. **Build → Realtime Database → Create database.** المنطقة مثلاً `europe-west1`، وابدأ بـlocked mode.
-3. **Build → Authentication → Sign-in method:** فعّل **Anonymous**.
-4. **Project settings → Your apps → Web app:** انسخ الـconfig لـ`FIREBASE` بـ`src/config.js`.
-5. **Realtime Database → Rules:** الصق محتوى `database.rules.json` واكبس Publish.
-6. **Authentication → Settings → Authorized domains:** ضيف `znad-odoo-dev.github.io`.
+### كل IP = زائر
 
-لما تشتغل، النقطة بالشريط بتصير خضرا.
-
-### ليش Realtime Database وما استعملنا Firestore؟
-
-- Firestore بيتحمّل تقريباً كتابة وحدة بالثانية على نفس الـdocument، وهاد ما بيكفي لعدّادات عليها ضغط عالي.
-- Realtime Database ما عليها هالحد، وفيها `increment()` بيصير على السيرفر.
-- كل دفعة كبسات بتتبعت بـ`update()` واحد ذرّي (atomic)، فيه كل العدّادات مع ختم الوقت.
+- السيرفر بياخد الـIP من `CF-Connecting-IP`، وبيخزّنه **مشفّر بـSHA-256 مع salt سري** (`IP_SALT`). الـIP الأصلي ما بيتخزّن أبداً.
+- كل IP بينعدّ **زائر واحد** بالمحافظة اللي عوى منها آخر مرة. لهيك جنب كل محافظة بالترتيب بتشوف 👤 عدد زوارها.
+- ⚠️ شركات الموبايل كتير بتستخدم CGNAT، يعني مئات الناس ممكن يطلعوا بنفس الـIP. فعدد الزوار الحقيقي ممكن يكون أكبر من الرقم المعروض.
 
 ### الحماية من الغش
 
-- كل زائر بياخد uid مجهول (Anonymous Auth)، وكل تاب بياخد uid لحاله.
-- أقصى حد **٢٠٠ كبسة بالدفعة**، ولازم يمرق **٢.٥ ثانية على الأقل** بين دفعتين من نفس الـuid. يعني الحد الأعلى تقريباً ٨٠ كبسة بالثانية.
-- زيادة الـ`total` لازم تساوي عدد كبسات الدفعة، وكل عدّاد تاني ما بيقدر يزيد أكتر من هالعدد.
-- أسماء الشخصيات والمحافظات لازم تكون من القائمة المسموحة.
+كلها بتنفّذ على السيرفر، ومُختبرة بـ`worker/test/api.test.mjs` (24 اختبار):
+
+- **Token bucket لكل IP:** دفعة أولى حدها 800 كبسة، وبعدين 80 كبسة بالثانية. يعني تقريباً 800 كبسة كل 10 ثواني لكل IP.
+- **الطلب الواحد:** ما بيقدر يحمل أكتر من 200 كبسة، وحجمه ما بيتجاوز 4KB.
+- **القوائم المسموحة:** أسماء الشخصيات والمحافظات لازم تكون من القائمة، والعدد لازم يكون صحيح وموجب.
+- **التحديث ذرّي:** كل الكتابات بالـDurable Object بتصير متزامنة، يعني الدفعة بتنحسب كلها أو ما بتنحسب أبداً.
+- **CORS:** بيسمح بس لـ`https://znad-odoo-dev.github.io`، ولـlocalhost وقت التطوير.
+
+### التطوير والاختبار
+
+```bash
+cd worker
+npm install
+npm run dev            # http://127.0.0.1:8787  (DEV=1 من .dev.vars)
+npm test               # 24 اختبار للـAPI والحماية
+```
+
+وبعدين افتح الموقع على السيرفر المحلي:
+http://127.0.0.1:5173/?api=http://127.0.0.1:8787
+
+بدون `?api=`، الموقع على localhost بيشتغل بالوضع المحلي.
+
+### النشر
+
+```bash
+cd worker
+npx wrangler login                 # مرة وحدة
+npx wrangler deploy
+npx wrangler secret put IP_SALT    # مرة وحدة: نص عشوائي طويل
+```
+
+**لو بدك تضيف شخصية:** ضيف الـslug لـ`CHARACTERS` بـ`worker/src/index.js`، وبعدين اعمل `deploy`.
+
+**الحدود المجانية:** خطة Cloudflare المجانية بتعطي تقريباً 100 ألف طلب باليوم. كل زائر بيبعت طلب كل 3 ثواني وهو عم يكبس، فإذا صار الموقع كتير مشهور بتحتاج خطة Workers Paid، وسعرها 5$ بالشهر.
 
 ## النشر على GitHub Pages
 

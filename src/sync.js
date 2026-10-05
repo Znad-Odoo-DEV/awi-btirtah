@@ -2,27 +2,29 @@
  * sync.js — click batching + totals.
  *
  * Clicks only touch an in-memory Map (zero I/O per click). Every SYNC.flushMs
- * the batch is sent as ONE atomic multi-path update of server-side increments
- * (remote mode) or merged into localStorage + broadcast to other tabs (local
- * mode). Unsent clicks survive reloads via localStorage.
+ * the batch goes to the Worker API as one POST that the server applies
+ * atomically (remote mode), or is merged into localStorage + broadcast to
+ * other tabs (local mode, when no API_URL is configured). Unsent clicks
+ * survive reloads via localStorage; on page close they go out via sendBeacon.
  *
  * Totals shape (both modes):
- *   { total, characters: {slug: n}, governorates: {slug: n}, matrix: {gov: {char: n}} }
+ *   { total, characters: {slug: n}, governorates: {slug: n}, matrix: {gov: {char: n}},
+ *     visitors: { total, governorates: {slug: n} } }   ← one visitor = one IP
  */
 
-import { SYNC, hasFirebase } from './config.js';
+import { SYNC, hasApi } from './config.js';
 
 const PENDING_KEY = 'aw.pending';
 const LOCAL_KEY = 'aw.localTotals';
 const CHANNEL = 'awi-walak';
 
-const empty = () => ({ total: 0, characters: {}, governorates: {}, matrix: {} });
+const empty = () => ({ total: 0, characters: {}, governorates: {}, matrix: {}, visitors: { total: 0, governorates: {} } });
 
 export function createSync({ onTotals, onStatus }) {
   /** "gov|char" → n */
   const pending = new Map();
   let pendingCount = 0;
-  let remote = null; // firebase.js module once connected
+  let remote = null; // api.js module (remote mode)
   let busy = false;
   let totals = empty();
   const bc = 'BroadcastChannel' in window ? new BroadcastChannel(CHANNEL) : null;
@@ -73,13 +75,12 @@ export function createSync({ onTotals, onStatus }) {
   }
 
   async function flush() {
-    if (busy || !pendingCount) return;
+    if (busy || !pendingCount || (hasApi && !remote)) return;
     busy = true;
     const { batch, n } = take(SYNC.maxPerFlush);
     try {
-      if (remote) await remote.push(batch, n);
+      if (remote) await remote.push(batch);
       else localPush(batch, n);
-      onStatus?.(remote ? 'online' : 'local');
     } catch (err) {
       putBack(batch);
       if (remote && err?.code !== 'offline') {
@@ -129,26 +130,33 @@ export function createSync({ onTotals, onStatus }) {
       if (document.visibilityState === 'hidden') flush();
     });
     addEventListener('pagehide', () => {
+      if (remote && !busy) {
+        // A fetch may not survive the page closing; a beacon does.
+        while (pendingCount) remote.beacon(take(SYNC.maxPerFlush).batch);
+      }
       persistPending();
-      flush();
     });
 
-    if (!hasFirebase) {
+    if (!hasApi) {
       onStatus?.('local');
       bc && (bc.onmessage = (e) => setTotals(e.data));
       addEventListener('storage', (e) => e.key === LOCAL_KEY && setTotals(readLocal()));
       setTotals(readLocal());
       return;
     }
-    try {
-      remote = await import('./firebase.js');
-      await remote.connect((t) => setTotals({ ...empty(), ...t }), onStatus);
-      onStatus?.('online');
-    } catch (err) {
-      console.warn('[sync] Firebase unavailable, falling back to local mode', err);
-      remote = null;
-      onStatus?.('local');
-      setTotals(readLocal());
+    // Remote mode: keep trying until the API answers. Clicks made meanwhile
+    // stay queued (and persisted) — they are never counted only locally.
+    const api = await import('./api.js');
+    for (let wait = 2000; ; wait = Math.min(wait * 2, 30000)) {
+      try {
+        await api.connect((t) => setTotals({ ...empty(), ...t }), onStatus);
+        remote = api;
+        onStatus?.('online');
+        return;
+      } catch (err) {
+        onStatus?.('offline');
+        await new Promise((r) => setTimeout(r, wait));
+      }
     }
   }
 

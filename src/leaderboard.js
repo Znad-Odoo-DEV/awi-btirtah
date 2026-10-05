@@ -21,6 +21,7 @@ function createList(ol, items, { thumb, highlight }) {
       ${thumb ? `<img class="row__thumb" width="40" height="40" alt="" loading="lazy" decoding="async">` : ''}
       <span class="row__name"></span>
       <span class="row__val"></span>
+      <span class="row__visitors" title="زوار"></span>
       <span class="row__move" aria-hidden="true"></span>
       <span class="row__bar" aria-hidden="true"><i></i></span>`;
     li.querySelector('.row__name').textContent = it.name;
@@ -31,13 +32,14 @@ function createList(ol, items, { thumb, highlight }) {
       val: li.querySelector('.row__val'),
       move: li.querySelector('.row__move'),
       bar: li.querySelector('.row__bar i'),
+      visitors: li.querySelector('.row__visitors'),
       img: li.querySelector('.row__thumb'),
       name: li.querySelector('.row__name'),
     });
   }
 
   /** values: slug → n; thumbs: slug → image base path (optional). */
-  function update(values, fmt, thumbs, mine) {
+  function update(values, fmt, thumbs, mine, visitors) {
     const next = [...order].sort((a, b) => (values[b] || 0) - (values[a] || 0) || order.indexOf(a) - order.indexOf(b));
     const max = Math.max(1, ...next.map((s) => values[s] || 0));
     const changed = next.some((s, i) => s !== order[i]);
@@ -53,6 +55,7 @@ function createList(ol, items, { thumb, highlight }) {
       r.li.classList.toggle('is-first', i === 0 && v > 0);
       r.li.classList.toggle('is-mine', slug === (mine || highlight));
       r.val.textContent = fmt(v);
+      if (visitors) r.visitors.textContent = `👤 ${fmt(visitors[slug] || 0)}`;
       r.bar.style.transform = `scaleX(${v / max})`;
       if (r.img && thumbs?.[slug]) {
         const src = `${thumbs[slug]}-256.webp`;
@@ -99,7 +102,7 @@ export function createBoards({ govsEl, characters, governorates }) {
         for (const c in row) if (!best || row[c] > row[best]) best = c;
         if (best && charImg[best]) topThumb[g.slug] = charImg[best];
       }
-      govs.update(view.governorates, fmt, topThumb, myGov);
+      govs.update(view.governorates, fmt, topThumb, myGov, view.visitors?.governorates);
     },
   };
 }

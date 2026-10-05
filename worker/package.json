@@ -1,0 +1,14 @@
+{
+  "name": "awi-btirtah-api",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy",
+    "test": "node test/api.test.mjs"
+  },
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  },
+  "private": true
+}
