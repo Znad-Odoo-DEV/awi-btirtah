@@ -1,0 +1,22 @@
+{
+  "bashar": {
+    "jawY": 0.787,
+    "chinY": 0.923
+  },
+  "maher": {
+    "jawY": 0.789,
+    "chinY": 0.927
+  },
+  "nasrallah": {
+    "jawY": 0.762,
+    "chinY": 1.0
+  },
+  "samir": {
+    "jawY": 0.836,
+    "chinY": 0.953
+  },
+  "ghazwan": {
+    "jawY": 0.754,
+    "chinY": 0.96
+  }
+}

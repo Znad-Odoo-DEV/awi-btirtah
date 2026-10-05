@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- cartoon dog face, howling -->
+  <path d="M10 8c6-2 13 4 14 12l-9 10C9 26 6 13 10 8z" fill="#6b3f22"/>
+  <path d="M54 8c-6-2-13 4-14 12l9 10c6-4 9-17 5-22z" fill="#6b3f22"/>
+  <ellipse cx="32" cy="34" rx="20" ry="21" fill="#c98a52"/>
+  <ellipse cx="32" cy="45" rx="13" ry="10" fill="#f1d3ad"/>
+  <circle cx="24" cy="29" r="3.4" fill="#141316"/>
+  <circle cx="40" cy="29" r="3.4" fill="#141316"/>
+  <circle cx="25.2" cy="27.8" r="1.1" fill="#fff"/>
+  <circle cx="41.2" cy="27.8" r="1.1" fill="#fff"/>
+  <ellipse cx="32" cy="38" rx="5" ry="3.6" fill="#141316"/>
+  <ellipse cx="32" cy="50" rx="5.2" ry="5" fill="#3a0a0e"/>
+  <ellipse cx="32" cy="53" rx="3.4" ry="2.2" fill="#ff3b30"/>
+</svg>

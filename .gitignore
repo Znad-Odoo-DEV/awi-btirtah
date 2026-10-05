@@ -1,0 +1,5 @@
+# source photos + the full dog video audio (only the processed assets ship)
+pic/
+scripts/out/
+__pycache__/
+node_modules/

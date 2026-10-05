@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>عوي بترتاح 🐕</title>
+  <meta name="description" content="عوي بترتاح 🐕">
+  <meta name="theme-color" content="#141316">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon-180.png">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="عوي بترتاح 🐕">
+  <meta property="og:description" content="🐕">
+  <meta property="og:image" content="assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="assets/og.png">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cairo:wght@600;900&family=Lalezar&display=swap">
+  <link rel="stylesheet" href="styles/main.css">
+  <link rel="modulepreload" href="src/main.js">
+</head>
+<body>
+  <div class="backdrop" id="backdrop" aria-hidden="true"></div>
+
+  <main class="stage" id="stage">
+    <h1 class="logo">عوي بترتاح</h1>
+    <output class="count" id="count" aria-live="off">0</output>
+    <button type="button" class="face" id="face" aria-label="عوّي"></button>
+  </main>
+
+  <div class="picker" id="picker" role="group" aria-label="الشخصيات"></div>
+  <button type="button" class="mute" id="btn-mute" aria-pressed="false" aria-label="الصوت">🔊</button>
+
+  <section class="board" id="board" aria-label="ترتيب المحافظات">
+    <div class="board__bar">
+      <button type="button" class="board__toggle" id="board-toggle" aria-expanded="false" aria-controls="board-body">
+        <span class="board__trophy" aria-hidden="true">🏆</span>
+        <span class="board__sep" aria-hidden="true"></span>
+        <span class="board__top"><b id="top-rank">#1</b> <span id="top-gov">—</span> <span class="board__compact" id="top-total">0</span></span>
+        <span class="board__dot" id="status-dot" aria-hidden="true"></span>
+      </button>
+      <button type="button" class="board__mine" id="my-gov-btn" aria-label="محافظتك">
+        <span aria-hidden="true">📍</span> <span id="my-gov">—</span> <b id="my-gov-total">0</b>
+      </button>
+      <button type="button" class="board__chev" id="board-chev" aria-expanded="false" aria-controls="board-body" aria-label="الترتيب">⌃</button>
+    </div>
+    <div class="board__body" id="board-body">
+      <div class="board__scroll">
+        <ol class="list" id="list-govs"></ol>
+      </div>
+    </div>
+  </section>
+
+  <dialog class="modal" id="gov-modal" aria-label="المحافظة">
+    <p class="modal__icon" aria-hidden="true">📍</p>
+    <div class="gov-grid" id="gov-grid"></div>
+  </dialog>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

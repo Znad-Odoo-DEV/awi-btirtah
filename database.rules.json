@@ -1,0 +1,50 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "counters": {
+      ".read": true,
+
+      "total": {
+        ".write": "auth != null",
+        ".validate": "newData.isNumber() && newData.parent().parent().child('rate/' + auth.uid + '/t').val() == now && ((data.exists() && newData.val() - data.val() == newData.parent().parent().child('rate/' + auth.uid + '/n').val()) || (!data.exists() && newData.val() == newData.parent().parent().child('rate/' + auth.uid + '/n').val()))"
+      },
+
+      "characters": {
+        "$char": {
+          ".write": "auth != null",
+          ".validate": "$char.matches(/^(bashar|maher|nasrallah|ghazwan|samir)$/) && newData.isNumber() && newData.parent().parent().parent().child('rate/' + auth.uid + '/t').val() == now && ((data.exists() && newData.val() > data.val() && newData.val() - data.val() <= newData.parent().parent().parent().child('rate/' + auth.uid + '/n').val()) || (!data.exists() && newData.val() > 0 && newData.val() <= newData.parent().parent().parent().child('rate/' + auth.uid + '/n').val()))"
+        }
+      },
+
+      "governorates": {
+        "$gov": {
+          ".write": "auth != null",
+          ".validate": "$gov.matches(/^(damascus|rif-dimashq|aleppo|homs|hama|latakia|tartus|idlib|deir-ez-zor|raqqa|hasakah|daraa|sweida|quneitra)$/) && newData.isNumber() && newData.parent().parent().parent().child('rate/' + auth.uid + '/t').val() == now && ((data.exists() && newData.val() > data.val() && newData.val() - data.val() <= newData.parent().parent().parent().child('rate/' + auth.uid + '/n').val()) || (!data.exists() && newData.val() > 0 && newData.val() <= newData.parent().parent().parent().child('rate/' + auth.uid + '/n').val()))"
+        }
+      },
+
+      "matrix": {
+        "$gov": {
+          "$char": {
+            ".write": "auth != null",
+            ".validate": "$gov.matches(/^(damascus|rif-dimashq|aleppo|homs|hama|latakia|tartus|idlib|deir-ez-zor|raqqa|hasakah|daraa|sweida|quneitra)$/) && $char.matches(/^(bashar|maher|nasrallah|ghazwan|samir)$/) && newData.isNumber() && newData.parent().parent().parent().parent().child('rate/' + auth.uid + '/t').val() == now && ((data.exists() && newData.val() > data.val() && newData.val() - data.val() <= newData.parent().parent().parent().parent().child('rate/' + auth.uid + '/n').val()) || (!data.exists() && newData.val() > 0 && newData.val() <= newData.parent().parent().parent().parent().child('rate/' + auth.uid + '/n').val()))"
+          }
+        }
+      },
+
+      "$other": { ".validate": false }
+    },
+
+    "rate": {
+      "$uid": {
+        ".write": "auth != null && auth.uid == $uid",
+        ".validate": "newData.hasChildren(['t', 'n'])",
+        "t": { ".validate": "newData.val() == now && (!data.exists() || now - data.val() >= 2500)" },
+        "n": { ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 200 && newData.val() % 1 == 0" },
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}
