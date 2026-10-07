@@ -1,0 +1,5 @@
+#!/bin/sh
+# Re-stamp cache-busting versions in index.html whenever site files change.
+if git diff --cached --name-only | grep -qE '^(src/|styles/|index\.html)'; then
+  node scripts/stamp.mjs >/dev/null && git add index.html
+fi

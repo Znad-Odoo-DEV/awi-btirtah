@@ -119,6 +119,18 @@ npx wrangler secret put IP_SALT    # مرة وحدة: نص عشوائي طويل
 
 الموقع منشور من فرع `main` (المجلد الرئيسي). أي `git push` بيحدّث الموقع خلال دقيقة تقريباً.
 
+### الكاش (مهم)
+
+GitHub Pages بيخلّي المتصفح يحتفظ بكل ملف لـ10 دقايق. لهيك كل ملفات `src/` و`styles/main.css` بتنطلب برقم نسخة (`?v=<hash>`) عن طريق import map بـ`index.html`، وهيك ما بيصير الموبايل يخلط ملف قديم مع ملف جديد.
+
+- **الأرقام بتتحدّث بـ:** `node scripts/stamp.mjs`.
+- **الـhook:** `.git/hooks/pre-commit` بيشغّل السكربت تلقائياً قبل كل commit.
+- **على جهاز جديد:** الـhook ما بينتقل مع الريبو، فركّبه مرة وحدة:
+
+```bash
+cp scripts/pre-commit .git/hooks/pre-commit
+```
+
 ## الصوت
 
 النبحة مقصوصة من الملف اللي قدّمه صاحب المشروع ("How Dogs React When Seeing Stranger 11"). القص من الثانية ٤١.٠٧، ومعه فلتر high-pass على 180Hz، والسكربت هو `scripts/extract-bark.py`. إذا الملف `assets/sfx/bark.mp3` مش موجود، الموقع بيرجع لأصوات مولّدة بـWeb Audio.
