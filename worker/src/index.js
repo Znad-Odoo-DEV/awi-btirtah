@@ -1,10 +1,11 @@
 /**
  * عوي بترتاح — global counters API (Cloudflare Worker + one Durable Object).
  *
- *   GET  /totals   → current totals (JSON, plus this visitor's vote)
+ *   GET  /totals?device=<id> → current totals (JSON, plus this device's vote)
  *   POST /flush    → body: {"batch": [["gov|char", n], ...]}  (text/plain so no CORS preflight,
  *                     and navigator.sendBeacon works on page close)
- *   POST /vote     → body: {"slug": "<candidate>"}  one vote per IP per round (can be moved)
+ *   POST /vote     → body: {"slug": "<candidate>", "device": "<random id>"}  one vote per device
+ *                     per round (can be moved), at most 10 voting devices per IP per round
  *   GET  /ws       → WebSocket; server pushes totals whenever they change (≤ 1/s)
  *
  * Identity = the visitor's IP (CF-Connecting-IP), stored only as a salted SHA-256
@@ -27,6 +28,7 @@ const GOVERNORATES = ['damascus', 'rif-dimashq', 'aleppo', 'homs', 'hama', 'lata
 const CHAR_SET = new Set(CHARACTERS);
 const GOV_SET = new Set(GOVERNORATES);
 
+const VOTES_PER_IP = 10; // devices that may vote from one IP per round
 const MAX_PER_FLUSH = 200; // a single request can't carry more than this
 const BUCKET_SIZE = 800; // burst
 const REFILL_PER_SEC = 80; // sustained clicks/sec per IP
@@ -53,6 +55,9 @@ async function hashIp(ip, salt) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(salt + '|' + ip));
   return [...new Uint8Array(buf).slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
+
+/** A device id is a random token the browser generates once (crypto.randomUUID). */
+const validDevice = (d) => typeof d === 'string' && /^[A-Za-z0-9-]{16,64}$/.test(d);
 
 /** Next Friday 00:00 Damascus time strictly after `now` (ms). */
 export function nextRoundEnd(now) {
@@ -106,7 +111,10 @@ export default {
       return stub.fetch(request);
     }
 
-    if (url.pathname === '/totals' && request.method === 'GET') return json(await stub.totals(await visitor()), 200, h);
+    if (url.pathname === '/totals' && request.method === 'GET') {
+      const device = url.searchParams.get('device');
+      return json(await stub.totals(validDevice(device) ? device : null), 200, h);
+    }
 
     if (url.pathname === '/flush' && request.method === 'POST') {
       const parsed = parseBatch(await request.text());
@@ -117,12 +125,14 @@ export default {
 
     if (url.pathname === '/vote' && request.method === 'POST') {
       const text = await request.text();
-      let slug = null;
+      let body = null;
       try {
-        if (text.length < 200) slug = JSON.parse(text)?.slug;
+        if (text.length < 300) body = JSON.parse(text);
       } catch {}
+      const slug = body?.slug;
       if (typeof slug !== 'string' || !CHAR_SET.has(slug)) return json({ error: 'bad_slug' }, 400, h);
-      const res = await stub.vote(await visitor(), slug);
+      if (!validDevice(body.device)) return json({ error: 'bad_device' }, 400, h);
+      const res = await stub.vote(await visitor(), body.device, slug);
       return json(res, res.error ? 400 : 200, h);
     }
 
@@ -147,7 +157,14 @@ export class Counter extends DurableObject {
         CREATE TABLE IF NOT EXISTS buckets (ip TEXT PRIMARY KEY, tokens REAL NOT NULL, t INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS round_howls (slug TEXT PRIMARY KEY, n INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS votes (ip TEXT PRIMARY KEY, slug TEXT NOT NULL, t INTEGER NOT NULL);
+      `);
+      // v2 votes are keyed by device (v1 was one vote per IP). Old per-IP rows can't
+      // be mapped to a device, so the table is recreated.
+      const cols = this.sql.exec("SELECT name FROM pragma_table_info('votes')").toArray().map((r) => r.name);
+      if (cols.length && !cols.includes('device')) this.sql.exec('DROP TABLE votes');
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS votes (device TEXT PRIMARY KEY, ip TEXT NOT NULL, slug TEXT NOT NULL, t INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS votes_ip ON votes (ip);
       `);
       this.loadRound();
       // Make sure the round ends even if nobody is on the site at that moment.
@@ -238,32 +255,38 @@ export class Counter extends DurableObject {
     return { last: this.last, totals: await this.totals() };
   }
 
-  /** One vote per IP per round; voting again just moves the vote. */
-  async vote(ip, slug) {
+  /**
+   * One vote per DEVICE per round (voting again just moves it), and at most
+   * VOTES_PER_IP devices may vote from the same IP in a round — so a family or
+   * a café can all vote, but private windows stop helping after 10.
+   */
+  async vote(ip, device, slug) {
     this.maybeRoll();
     if (!this.candidates().includes(slug)) return { error: 'not_candidate' };
-    const prev = this.sql.exec('SELECT slug FROM votes WHERE ip = ?', ip).toArray()[0]?.slug;
-    if (prev !== slug) {
-      this.sql.exec(
-        'INSERT INTO votes (ip, slug, t) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET slug = excluded.slug, t = excluded.t',
-        ip,
-        slug,
-        Date.now(),
-      );
+    const prev = this.sql.exec('SELECT slug FROM votes WHERE device = ?', device).toArray()[0];
+    if (!prev) {
+      const used = this.sql.exec('SELECT COUNT(*) AS n FROM votes WHERE ip = ?', ip).one().n;
+      if (used >= VOTES_PER_IP) return { error: 'ip_limit', limit: VOTES_PER_IP };
+      this.sql.exec('INSERT INTO votes (device, ip, slug, t) VALUES (?, ?, ?, ?)', device, ip, slug, Date.now());
+    } else if (prev.slug !== slug) {
+      // Moving a vote keeps the IP it was first cast from (no slot shopping).
+      this.sql.exec('UPDATE votes SET slug = ?, t = ? WHERE device = ?', slug, Date.now(), device);
+    }
+    if (prev?.slug !== slug) {
       this.cache = null;
       await this.scheduleBroadcast();
     }
-    return { myVote: slug, totals: await this.totals(ip) };
+    return { myVote: slug, totals: await this.totals(device) };
   }
 
   /* ---------- totals ---------- */
 
-  /** Shared totals (cached until the next write), plus this visitor's vote if `ip` is given. */
-  async totals(ip) {
+  /** Shared totals (cached until the next write), plus this device's vote if `device` is given. */
+  async totals(device) {
     this.maybeRoll();
     this.cache ||= this.buildTotals();
-    if (!ip) return this.cache;
-    const myVote = this.sql.exec('SELECT slug FROM votes WHERE ip = ?', ip).toArray()[0]?.slug || null;
+    if (!device) return this.cache;
+    const myVote = this.sql.exec('SELECT slug FROM votes WHERE device = ?', device).toArray()[0]?.slug || null;
     return { ...this.cache, myVote };
   }
 

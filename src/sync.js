@@ -160,7 +160,7 @@ export function createSync({ onTotals, onStatus }) {
   async function vote(slug) {
     if (remote) {
       const res = await remote.vote(slug);
-      if (res.error) throw new Error(res.error);
+      if (res.error) throw Object.assign(new Error(res.error), { code: res.error });
       return res.myVote;
     }
     const t = structuredClone(totals);

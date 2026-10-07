@@ -93,10 +93,13 @@ ok(before != null && last && last.total === before + 4 && last.governorates.qune
 ws.close();
 
 /* --- weekly rounds: voting + stage swap --- */
-const vote = (slug, testIp, raw) =>
-  fetch(`${BASE}/vote`, { method: 'POST', headers: { 'Content-Type': 'text/plain', 'X-Test-IP': testIp }, body: raw ?? JSON.stringify({ slug }) });
+const dev = () => crypto.randomUUID();
+// A voter = one device on one IP. vote(slug, [ip, device]).
+const voter = () => [ip(), dev()];
+const vote = (slug, [testIp, device], raw) =>
+  fetch(`${BASE}/vote`, { method: 'POST', headers: { 'Content-Type': 'text/plain', 'X-Test-IP': testIp }, body: raw ?? JSON.stringify({ slug, device }) });
 const roll = () => fetch(`${BASE}/dev/roll`, { method: 'POST' }).then((r) => r.json());
-const totalsAs = (testIp) => fetch(`${BASE}/totals`, { headers: { 'X-Test-IP': testIp } }).then((r) => r.json());
+const totalsAs = ([, device]) => fetch(`${BASE}/totals?device=${device}`).then((r) => r.json());
 
 await roll(); // start from a clean round (whatever earlier runs left behind)
 let s = await totals();
@@ -106,22 +109,26 @@ ok(end.getUTCDay() === 5 && end.getUTCHours() === 0 && end.getUTCMinutes() === 0
 ok(s.round.endsAt > Date.now() && s.round.endsAt <= Date.now() + 7 * 864e5, 'round ends within the next 7 days');
 
 const [X, Y] = s.candidates;
-const V1 = ip(), V2 = ip(), V3 = ip();
+const V1 = voter(), V2 = voter(), V3 = voter();
 r = await vote(X, V1);
 body = await r.json();
 ok(r.status === 200 && body.myVote === X && body.totals.round.votes[X] === 1, 'vote for a candidate counts');
-ok((await totalsAs(V1)).myVote === X, 'GET /totals tells the visitor their own vote');
+ok((await totalsAs(V1)).myVote === X, 'GET /totals tells the device its own vote');
 await vote(X, V1);
-ok((await totals()).round.votes[X] === 1, 'same IP voting again does not add a vote');
+ok((await totals()).round.votes[X] === 1, 'same device voting again does not add a vote');
 await vote(Y, V1);
 s = await totals();
-ok(!s.round.votes[X] && s.round.votes[Y] === 1, 'same IP can move its vote', JSON.stringify(s.round.votes));
+ok(!s.round.votes[X] && s.round.votes[Y] === 1, 'same device can move its vote', JSON.stringify(s.round.votes));
 r = await vote(s.stage[0], V2);
 ok(r.status === 400, 'cannot vote for a character already on stage', `status ${r.status}`);
 r = await vote('nobody', V2);
 ok(r.status === 400, 'cannot vote for an unknown slug');
 r = await vote(null, V2, '{bad');
 ok(r.status === 400, 'bad vote JSON rejected');
+r = await vote(X, [V2[0], undefined]);
+ok(r.status === 400, 'vote without a device id rejected');
+r = await vote(X, [V2[0], 'short']);
+ok(r.status === 400, 'malformed device id rejected');
 
 // Howl for every stage character except stage[2] → it must be the one that drops.
 const stage = [...s.stage];
@@ -144,11 +151,36 @@ ok(JSON.stringify(s.stage) === JSON.stringify(before2), 'no votes → nobody is 
 
 // Tie: both candidates get 1 vote; the one that got it first wins.
 const [P, Q] = s.candidates;
-await vote(P, ip());
+await vote(P, voter());
 await new Promise((r) => setTimeout(r, 20));
-await vote(Q, ip());
+await vote(Q, voter());
 const tie = await roll();
 ok(tie.last.winner === P, 'tie → the candidate that reached the count first wins', JSON.stringify(tie.last));
+
+/* --- one vote per device, max 10 devices per IP --- */
+await roll();
+s = await totals();
+const C1 = s.candidates[0];
+const HOME = ip();
+const devices = Array.from({ length: 11 }, dev);
+r = await vote(C1, [HOME, devices[0]]);
+const r2 = await vote(C1, [HOME, devices[1]]);
+ok(r.status === 200 && r2.status === 200 && (await totals()).round.votes[C1] === 2, 'two devices on the same IP = two votes');
+for (let i = 2; i < 10; i++) await vote(C1, [HOME, devices[i]]);
+ok((await totals()).round.votes[C1] === 10, '10 devices on one IP all count');
+r = await vote(C1, [HOME, devices[10]]);
+body = await r.json();
+ok(r.status === 400 && body.error === 'ip_limit' && (await totals()).round.votes[C1] === 10, '11th device on the same IP is refused', `status ${r.status} ${body.error}`);
+if (s.candidates[1]) {
+  r = await vote(s.candidates[1], [HOME, devices[3]]);
+  const t = await totals();
+  ok(r.status === 200 && t.round.votes[C1] === 9 && t.round.votes[s.candidates[1]] === 1, 'a device can still move its vote when its IP is full');
+}
+r = await vote(C1, [ip(), devices[10]]);
+ok(r.status === 200, 'the refused device can vote from a different IP');
+r = await vote(C1, [ip(), devices[0]]);
+ok(r.status === 200 && (await totals()).round.votes[C1] >= 10, 'same device from another IP still has only one vote', JSON.stringify((await totals()).round.votes));
+await roll();
 
 /* --- CORS --- */
 const pre = await fetch(`${BASE}/flush`, { method: 'OPTIONS', headers: { Origin: 'https://evil.example' } });

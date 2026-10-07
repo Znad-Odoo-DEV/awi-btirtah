@@ -449,6 +449,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .risk img { width: 48px; height: 48px; border-radius: 50%; object-fit: cover; border: 2px solid var(--line); }
 .risk.is-low { color: var(--accent); }
 .risk.is-low img { border-color: var(--accent); }
+.vote__msg { margin: 12px 0 0; padding: 8px 12px; border-radius: 10px; background: rgba(255, 59, 48, 0.15); color: #ff8a80; text-align: center; font-weight: 900; }
 .vote__last { margin: 12px 0 0; text-align: center; color: var(--muted); font-weight: 600; white-space: pre; }
 
 /* ---------- ?debug=1 calibration panel ---------- */

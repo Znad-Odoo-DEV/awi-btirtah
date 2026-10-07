@@ -10,6 +10,18 @@
 import { API_URL } from './config.js';
 
 let online = false;
+
+/** Random id for this browser, made once — votes are one per device (max 10 per IP). */
+const DEVICE = (() => {
+  const make = () => crypto.randomUUID?.() || [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  try {
+    let id = localStorage.getItem('aw.device');
+    if (!id) localStorage.setItem('aw.device', (id = make()));
+    return id;
+  } catch {
+    return make();
+  }
+})();
 let onTotalsCb, onStatusCb;
 let ws = null;
 let retry = 0;
@@ -23,7 +35,7 @@ function setOnline(v) {
 
 async function poll() {
   try {
-    const r = await fetch(`${API_URL}/totals`, { cache: 'no-store' });
+    const r = await fetch(`${API_URL}/totals?device=${DEVICE}`, { cache: 'no-store' });
     if (r.ok) {
       onTotalsCb(await r.json());
       setOnline(true);
@@ -105,12 +117,12 @@ export function beacon(batch) {
   return true;
 }
 
-/** Cast or move this visitor's vote. Resolves to the server reply ({myVote, totals} or {error}). */
+/** Cast or move this device's vote. Resolves to the server reply ({myVote, totals} or {error}). */
 export async function vote(slug) {
   const r = await fetch(`${API_URL}/vote`, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({ slug }),
+    body: JSON.stringify({ slug, device: DEVICE }),
   });
   const res = await r.json().catch(() => ({ error: 'bad_reply' }));
   if (res.totals) onTotalsCb(res.totals);

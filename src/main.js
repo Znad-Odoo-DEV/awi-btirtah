@@ -66,6 +66,7 @@ const el = {
   voteGrid: $('#vote-grid'),
   voteStage: $('#vote-stage'),
   voteLast: $('#vote-last'),
+  voteMsg: $('#vote-msg'),
 };
 
 const fmt = new Intl.NumberFormat('en-US').format;
@@ -291,6 +292,7 @@ function bindUi() {
 /* ---------- 🗳️ weekly vote ---------- */
 
 function openVote() {
+  el.voteMsg.hidden = true;
   pointers.clear();
   keys.clear();
   face.close();
@@ -366,10 +368,15 @@ function renderVote(v) {
 }
 
 async function castVote(slug) {
+  el.voteMsg.hidden = true;
   try {
     await sync.vote(slug);
   } catch (err) {
-    console.warn('[vote]', err);
+    // 10 devices on this network already voted this round.
+    if (err.code === 'ip_limit') {
+      el.voteMsg.textContent = '🚫 هالشبكة صوّتت ١٠ مرات بهالجولة';
+      el.voteMsg.hidden = false;
+    } else console.warn('[vote]', err);
   }
   renderVote(sync.view());
 }
