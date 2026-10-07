@@ -92,6 +92,64 @@ const last = msgs.at(-1);
 ok(before != null && last && last.total === before + 4 && last.governorates.quneitra >= 4, 'WebSocket pushes new totals to other visitors', `${before} → ${last?.total}`);
 ws.close();
 
+/* --- weekly rounds: voting + stage swap --- */
+const vote = (slug, testIp, raw) =>
+  fetch(`${BASE}/vote`, { method: 'POST', headers: { 'Content-Type': 'text/plain', 'X-Test-IP': testIp }, body: raw ?? JSON.stringify({ slug }) });
+const roll = () => fetch(`${BASE}/dev/roll`, { method: 'POST' }).then((r) => r.json());
+const totalsAs = (testIp) => fetch(`${BASE}/totals`, { headers: { 'X-Test-IP': testIp } }).then((r) => r.json());
+
+await roll(); // start from a clean round (whatever earlier runs left behind)
+let s = await totals();
+ok(s.stage?.length === 5 && s.candidates?.length >= 1 && s.stage.every((c) => !s.candidates.includes(c)), 'stage has 5, candidates are the rest', `stage ${s.stage}, candidates ${s.candidates}`);
+const end = new Date(s.round.endsAt + 3 * 3600_000);
+ok(end.getUTCDay() === 5 && end.getUTCHours() === 0 && end.getUTCMinutes() === 0, 'round ends Friday 00:00 Damascus time', new Date(s.round.endsAt).toISOString());
+ok(s.round.endsAt > Date.now() && s.round.endsAt <= Date.now() + 7 * 864e5, 'round ends within the next 7 days');
+
+const [X, Y] = s.candidates;
+const V1 = ip(), V2 = ip(), V3 = ip();
+r = await vote(X, V1);
+body = await r.json();
+ok(r.status === 200 && body.myVote === X && body.totals.round.votes[X] === 1, 'vote for a candidate counts');
+ok((await totalsAs(V1)).myVote === X, 'GET /totals tells the visitor their own vote');
+await vote(X, V1);
+ok((await totals()).round.votes[X] === 1, 'same IP voting again does not add a vote');
+await vote(Y, V1);
+s = await totals();
+ok(!s.round.votes[X] && s.round.votes[Y] === 1, 'same IP can move its vote', JSON.stringify(s.round.votes));
+r = await vote(s.stage[0], V2);
+ok(r.status === 400, 'cannot vote for a character already on stage', `status ${r.status}`);
+r = await vote('nobody', V2);
+ok(r.status === 400, 'cannot vote for an unknown slug');
+r = await vote(null, V2, '{bad');
+ok(r.status === 400, 'bad vote JSON rejected');
+
+// Howl for every stage character except stage[2] → it must be the one that drops.
+const stage = [...s.stage];
+const loser = stage[2];
+for (const c of stage) if (c !== loser) await flush([[`homs|${c}`, 3]], ip());
+const loserAllTime = (await totals()).characters[loser] || 0;
+await vote(X, V1); // V1 moves back to X
+await vote(X, V2);
+await vote(Y, V3); // X: 2, Y: 1
+const rolled = await roll();
+s = rolled.totals;
+ok(rolled.last.winner === X && rolled.last.loser === loser, 'most-voted candidate wins, fewest round howls loses', JSON.stringify(rolled.last));
+ok(s.stage[2] === X && s.candidates.includes(loser) && s.candidates.includes(Y), 'winner takes the loser\'s place; loser becomes a candidate', `stage ${s.stage}`);
+ok(Object.keys(s.round.votes).length === 0 && Object.keys(s.round.howls).length === 0, 'new round starts with zero votes and zero round howls');
+ok((s.characters[loser] || 0) === loserAllTime, 'loser keeps its all-time howls', `${loserAllTime}`);
+
+const before2 = [...s.stage];
+s = (await roll()).totals;
+ok(JSON.stringify(s.stage) === JSON.stringify(before2), 'no votes → nobody is swapped');
+
+// Tie: both candidates get 1 vote; the one that got it first wins.
+const [P, Q] = s.candidates;
+await vote(P, ip());
+await new Promise((r) => setTimeout(r, 20));
+await vote(Q, ip());
+const tie = await roll();
+ok(tie.last.winner === P, 'tie → the candidate that reached the count first wins', JSON.stringify(tie.last));
+
 /* --- CORS --- */
 const pre = await fetch(`${BASE}/flush`, { method: 'OPTIONS', headers: { Origin: 'https://evil.example' } });
 ok(!pre.headers.get('access-control-allow-origin'), 'unknown origin gets no CORS grant');

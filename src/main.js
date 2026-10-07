@@ -6,7 +6,7 @@
  * single rAF text update. No network, no layout reads, no storage.
  */
 
-import { CHARACTERS, GOVERNORATES } from './config.js';
+import { CHARACTERS, GOVERNORATES, DEFAULT_STAGE } from './config.js';
 import * as audio from './audio.js';
 import { createFace, mountDebug } from './face.js';
 import { createSync } from './sync.js';
@@ -61,6 +61,11 @@ const el = {
   dot: $('#status-dot'),
   govModal: $('#gov-modal'),
   govGrid: $('#gov-grid'),
+  voteModal: $('#vote-modal'),
+  voteTimer: $('#vote-timer'),
+  voteGrid: $('#vote-grid'),
+  voteStage: $('#vote-stage'),
+  voteLast: $('#vote-last'),
 };
 
 const fmt = new Intl.NumberFormat('en-US').format;
@@ -74,7 +79,10 @@ let dirty = true; // leaderboard needs a refresh
 let debug = null;
 
 const sync = createSync({
-  onTotals: () => (dirty = true),
+  onTotals: (t) => {
+    dirty = true;
+    renderStage(t.stage);
+  },
   onStatus: (s) => {
     if (s === 'retry') return;
     el.dot.dataset.status = s;
@@ -82,10 +90,20 @@ const sync = createSync({
   },
 });
 
-/* ---------- character picker ---------- */
+/* ---------- character picker (the 5 on stage) + 🗳️ ---------- */
 
-function buildPicker() {
-  for (const c of CHARACTERS) {
+let stageKey = '';
+
+/** Rebuild the circles whenever the server's line-up changes (weekly vote). */
+function renderStage(stage = DEFAULT_STAGE) {
+  const key = stage.join(',');
+  if (key === stageKey) return;
+  stageKey = key;
+  el.picker.querySelectorAll('.pick:not(.pick--vote)').forEach((b) => b.remove());
+  const voteBtn = el.picker.querySelector('.pick--vote');
+  for (const slug of stage) {
+    const c = charBySlug(slug);
+    if (!c) continue;
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'pick';
@@ -99,8 +117,21 @@ function buildPicker() {
     badge.textContent = '0';
     b.append(img, badge);
     b.addEventListener('click', () => setChar(c));
-    el.picker.appendChild(b);
+    el.picker.insertBefore(b, voteBtn);
   }
+  // The character you were on got voted off stage → jump to the first one.
+  setChar(stage.includes(state.char.slug) ? state.char : charBySlug(stage[0]));
+}
+
+function buildVoteButton() {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'pick pick--vote';
+  b.setAttribute('aria-label', 'التصويت');
+  b.title = 'التصويت';
+  b.textContent = '🗳️';
+  b.addEventListener('click', openVote);
+  el.picker.appendChild(b);
 }
 
 function setChar(c) {
@@ -108,7 +139,7 @@ function setChar(c) {
   store.set('char', c.slug);
   face.setCharacter(c);
   el.backdrop.style.backgroundImage = `url(${c.img}-256.webp)`;
-  el.picker.querySelectorAll('.pick').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.slug === c.slug)));
+  el.picker.querySelectorAll('.pick:not(.pick--vote)').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.slug === c.slug)));
   debug?.refresh();
   dirty = true;
 }
@@ -257,6 +288,92 @@ function bindUi() {
   el.myGovBtn.addEventListener('click', openGovModal);
 }
 
+/* ---------- 🗳️ weekly vote ---------- */
+
+function openVote() {
+  pointers.clear();
+  keys.clear();
+  face.close();
+  renderVote(sync.view());
+  el.voteModal.showModal();
+}
+
+function countdown(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400);
+  const p = (n) => String(n).padStart(2, '0');
+  const hms = `${p(Math.floor((s % 86400) / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
+  const ltr = `⁦${hms}⁩`; // keep 12:34:56 left-to-right inside the Arabic line
+  return d ? `${d} يوم و ${ltr}` : ltr;
+}
+
+/** Fill the vote dialog: countdown, candidate cards, and who is at risk on stage. */
+function renderVote(v) {
+  el.voteTimer.textContent = countdown(v.round.endsAt - Date.now());
+  const votes = v.round.votes || {};
+  const max = Math.max(1, ...v.candidates.map((s) => votes[s] || 0));
+  const mine = sync.myVote;
+  const cards = v.candidates.map((slug) => {
+    const c = charBySlug(slug);
+    const n = votes[slug] || 0;
+    return { slug, c, n, w: n / max };
+  });
+  if (el.voteGrid.dataset.key !== cards.map((x) => x.slug).join()) {
+    el.voteGrid.dataset.key = cards.map((x) => x.slug).join();
+    el.voteGrid.innerHTML = '';
+    for (const { slug, c } of cards) {
+      if (!c) continue;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cand';
+      b.dataset.slug = slug;
+      b.innerHTML = '<img width="96" height="96" alt=""><span class="cand__name"></span><span class="cand__votes"></span><span class="cand__bar"><i></i></span>';
+      b.querySelector('img').src = `${c.img}-256.webp`;
+      b.querySelector('.cand__name').textContent = c.name;
+      b.addEventListener('click', () => castVote(slug));
+      el.voteGrid.appendChild(b);
+    }
+  }
+  for (const { slug, n, w } of cards) {
+    const b = el.voteGrid.querySelector(`[data-slug="${slug}"]`);
+    if (!b) continue;
+    b.setAttribute('aria-pressed', String(slug === mine));
+    b.querySelector('.cand__votes').textContent = `🗳️ ${fmt(n)}`;
+    b.querySelector('.cand__bar i').style.transform = `scaleX(${w})`;
+  }
+
+  // On stage: howls this round; the lowest one is the one that would drop.
+  const howls = v.round.howls || {};
+  const lowest = [...v.stage].sort((a, b) => (howls[a] || 0) - (howls[b] || 0) || (v.characters[a] || 0) - (v.characters[b] || 0))[0];
+  el.voteStage.innerHTML = '';
+  for (const slug of v.stage) {
+    const c = charBySlug(slug);
+    if (!c) continue;
+    const d = document.createElement('div');
+    d.className = 'risk' + (slug === lowest ? ' is-low' : '');
+    d.innerHTML = '<img width="56" height="56" alt=""><span></span>';
+    d.querySelector('img').src = `${c.img}-256.webp`;
+    d.querySelector('img').alt = c.name;
+    d.querySelector('span').textContent = (slug === lowest ? '⬇️ ' : '') + compact(howls[slug] || 0);
+    el.voteStage.appendChild(d);
+  }
+
+  const last = v.last;
+  const w = last?.winner && charBySlug(last.winner);
+  const l = last?.loser && charBySlug(last.loser);
+  el.voteLast.hidden = !(w && l);
+  if (w && l) el.voteLast.textContent = `⬆️ ${w.name}   ⬇️ ${l.name}`;
+}
+
+async function castVote(slug) {
+  try {
+    await sync.vote(slug);
+  } catch (err) {
+    console.warn('[vote]', err);
+  }
+  renderVote(sync.view());
+}
+
 /* ---------- live numbers ---------- */
 
 function tick() {
@@ -269,11 +386,12 @@ function tick() {
     el.myGov.textContent = state.gov.name;
     el.myGovTotal.textContent = fmt(v.governorates[state.gov.slug] || 0);
   }
-  el.picker.querySelectorAll('.pick').forEach((b) => {
+  el.picker.querySelectorAll('.pick:not(.pick--vote)').forEach((b) => {
     const t = compact(v.characters[b.dataset.slug] || 0);
     const badge = b.lastElementChild;
     if (badge.textContent !== t) badge.textContent = t;
   });
+  if (el.voteModal.open) renderVote(v);
   if (dirty && boards && el.board.classList.contains('is-open')) {
     dirty = false;
     boards.update(v, fmt, state.gov?.slug);
@@ -298,9 +416,10 @@ async function loadBoards() {
 /* ---------- boot ---------- */
 
 function boot() {
-  buildPicker();
+  buildVoteButton();
+  renderStage(sync.view().stage);
   buildGovModal();
-  setChar(state.char);
+  el.voteModal.addEventListener('click', (e) => (e.target === el.voteModal || e.target.closest('[data-close]')) && el.voteModal.close());
   renderCount();
   bindInput();
   bindUi();

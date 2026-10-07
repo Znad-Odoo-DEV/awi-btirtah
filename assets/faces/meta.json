@@ -18,5 +18,13 @@
   "ghazwan": {
     "jawY": 0.754,
     "chinY": 0.96
+  },
+  "hafez": {
+    "jawY": 0.765,
+    "chinY": 0.925
+  },
+  "soleimani": {
+    "jawY": 0.792,
+    "chinY": 0.984
   }
 }

@@ -63,9 +63,24 @@ export const CHARACTERS = [
     img: 'assets/faces/samir',
     face: { jawY: 0.84, mouthX: 0.46, mouthW: 0.17, jawW: 0.2, chinY: 0.965, drop: 0.08 },
   },
+  {
+    slug: 'hafez',
+    name: 'حافظ الأسد',
+    img: 'assets/faces/hafez',
+    face: { jawY: 0.752, mouthX: 0.51, mouthW: 0.14, jawW: 0.19, chinY: 0.89, drop: 0.09 },
+  },
+  {
+    slug: 'soleimani',
+    name: 'قاسم سليماني',
+    img: 'assets/faces/soleimani',
+    face: { jawY: 0.772, mouthX: 0.535, mouthW: 0.14, jawW: 0.2, chinY: 0.965, drop: 0.09 },
+  },
 ];
 
-/** The 14 governorates. Slugs are whitelisted in database.rules.json. */
+/** Who is on stage until the server says otherwise (must match INITIAL_STAGE in the worker). */
+export const DEFAULT_STAGE = ['bashar', 'maher', 'nasrallah', 'ghazwan', 'samir'];
+
+/** The 14 governorates. Slugs are whitelisted in worker/src/index.js. */
 export const GOVERNORATES = [
   { slug: 'damascus', name: 'دمشق' },
   { slug: 'rif-dimashq', name: 'ريف دمشق' },

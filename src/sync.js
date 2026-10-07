@@ -9,10 +9,32 @@
  *
  * Totals shape (both modes):
  *   { total, characters: {slug: n}, governorates: {slug: n}, matrix: {gov: {char: n}},
- *     visitors: { total, governorates: {slug: n} } }   ← one visitor = one IP
+ *     visitors: { total, governorates: {slug: n} },     ← one visitor = one IP
+ *     stage: [5 slugs], candidates: [slugs], myVote,
+ *     round: { id, endsAt, howls: {slug: n}, votes: {slug: n} }, last: {winner, loser, …} }
  */
 
-import { SYNC, hasApi } from './config.js';
+import { SYNC, hasApi, CHARACTERS, DEFAULT_STAGE } from './config.js';
+
+const VOTE_KEY = 'aw.vote';
+
+/** Next Friday 00:00 Damascus (UTC+3) — same rule as the worker; used in local mode. */
+function nextRoundEnd(now) {
+  const tz = 3 * 3600_000;
+  const local = new Date(now + tz);
+  let end = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + ((5 - local.getUTCDay() + 7) % 7)) - tz;
+  return end <= now ? end + 7 * 864e5 : end;
+}
+
+/** Fill in the round fields for local mode / before the server answers. */
+function withRound(t) {
+  if (!t.stage) {
+    t.stage = DEFAULT_STAGE;
+    t.candidates = CHARACTERS.map((c) => c.slug).filter((s) => !DEFAULT_STAGE.includes(s));
+  }
+  t.round ||= { id: 0, endsAt: nextRoundEnd(Date.now()), howls: {}, votes: {} };
+  return t;
+}
 
 const PENDING_KEY = 'aw.pending';
 const LOCAL_KEY = 'aw.localTotals';
@@ -26,7 +48,7 @@ export function createSync({ onTotals, onStatus }) {
   let pendingCount = 0;
   let remote = null; // api.js module (remote mode)
   let busy = false;
-  let totals = empty();
+  let totals = withRound(empty());
   const bc = 'BroadcastChannel' in window ? new BroadcastChannel(CHANNEL) : null;
 
   // Restore clicks that never made it out last time.
@@ -104,13 +126,14 @@ export function createSync({ onTotals, onStatus }) {
   }
 
   function localPush(batch, n) {
-    const t = readLocal();
+    const t = withRound(readLocal());
     t.total += n;
     for (const [k, v] of batch) {
       const [gov, char] = k.split('|');
       t.characters[char] = (t.characters[char] || 0) + v;
       t.governorates[gov] = (t.governorates[gov] || 0) + v;
       (t.matrix[gov] ||= {})[char] = (t.matrix[gov][char] || 0) + v;
+      t.round.howls[char] = (t.round.howls[char] || 0) + v;
     }
     localStorage.setItem(LOCAL_KEY, JSON.stringify(t));
     setTotals(t);
@@ -118,8 +141,36 @@ export function createSync({ onTotals, onStatus }) {
   }
 
   function setTotals(t) {
-    totals = t;
-    onTotals?.(t);
+    totals = withRound({ ...empty(), ...t });
+    // WebSocket pushes don't carry myVote; keep the last one we know for this round.
+    if ('myVote' in t) myVote = { round: totals.round.id, slug: t.myVote };
+    if (myVote && myVote.round !== totals.round.id) myVote = null;
+    try {
+      localStorage.setItem(VOTE_KEY, JSON.stringify(myVote));
+    } catch {}
+    onTotals?.(totals);
+  }
+
+  let myVote = null;
+  try {
+    myVote = JSON.parse(localStorage.getItem(VOTE_KEY) || 'null');
+  } catch {}
+
+  /** Vote (or move the vote). Remote: server decides. Local mode: just remembered here. */
+  async function vote(slug) {
+    if (remote) {
+      const res = await remote.vote(slug);
+      if (res.error) throw new Error(res.error);
+      return res.myVote;
+    }
+    const t = structuredClone(totals);
+    if (myVote?.slug) t.round.votes[myVote.slug] = Math.max(0, (t.round.votes[myVote.slug] || 1) - 1);
+    t.round.votes[slug] = (t.round.votes[slug] || 0) + 1;
+    try {
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(t));
+    } catch {}
+    setTotals({ ...t, myVote: slug });
+    return slug;
   }
 
   async function start() {
@@ -149,7 +200,7 @@ export function createSync({ onTotals, onStatus }) {
     const api = await import('./api.js');
     for (let wait = 2000; ; wait = Math.min(wait * 2, 30000)) {
       try {
-        await api.connect((t) => setTotals({ ...empty(), ...t }), onStatus);
+        await api.connect(setTotals, onStatus);
         remote = api;
         onStatus?.('online');
         return;
@@ -164,6 +215,10 @@ export function createSync({ onTotals, onStatus }) {
     add,
     flush,
     start,
+    vote,
+    get myVote() {
+      return myVote?.slug || null;
+    },
     get totals() {
       return totals;
     },
@@ -177,6 +232,7 @@ export function createSync({ onTotals, onStatus }) {
         v.characters[char] = (v.characters[char] || 0) + n;
         v.governorates[gov] = (v.governorates[gov] || 0) + n;
         (v.matrix[gov] ||= {})[char] = (v.matrix[gov][char] || 0) + n;
+        v.round.howls[char] = (v.round.howls[char] || 0) + n;
       }
       return v;
     },

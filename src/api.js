@@ -104,3 +104,15 @@ export function beacon(batch) {
   fetch(`${API_URL}/flush`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, keepalive: true }).catch(() => {});
   return true;
 }
+
+/** Cast or move this visitor's vote. Resolves to the server reply ({myVote, totals} or {error}). */
+export async function vote(slug) {
+  const r = await fetch(`${API_URL}/vote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ slug }),
+  });
+  const res = await r.json().catch(() => ({ error: 'bad_reply' }));
+  if (res.totals) onTotalsCb(res.totals);
+  return res;
+}

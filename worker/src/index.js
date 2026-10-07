@@ -1,19 +1,28 @@
 /**
  * عوي بترتاح — global counters API (Cloudflare Worker + one Durable Object).
  *
- *   GET  /totals   → current totals (JSON)
+ *   GET  /totals   → current totals (JSON, plus this visitor's vote)
  *   POST /flush    → body: {"batch": [["gov|char", n], ...]}  (text/plain so no CORS preflight,
  *                     and navigator.sendBeacon works on page close)
+ *   POST /vote     → body: {"slug": "<candidate>"}  one vote per IP per round (can be moved)
  *   GET  /ws       → WebSocket; server pushes totals whenever they change (≤ 1/s)
  *
  * Identity = the visitor's IP (CF-Connecting-IP), stored only as a salted SHA-256
  * hash. Every IP is one "visitor"; each IP gets a token bucket of clicks
  * (burst 800, refill 80/s ≈ 800 clicks per 10 s) shared by everyone behind it.
+ *
+ * Weekly rounds: 5 characters are on stage, the rest are candidates. When a
+ * round ends (Friday 00:00 Damascus time) the candidate with the most votes
+ * replaces the on-stage character with the fewest howls THIS round, and that
+ * one drops into the candidates. All-time counters are never reset.
  */
 
 import { DurableObject } from 'cloudflare:workers';
 
-const CHARACTERS = ['bashar', 'maher', 'nasrallah', 'ghazwan', 'samir'];
+/** Every character that exists (on stage or candidate). Add new ones here. */
+const CHARACTERS = ['bashar', 'maher', 'nasrallah', 'ghazwan', 'samir', 'hafez', 'soleimani'];
+const INITIAL_STAGE = ['bashar', 'maher', 'nasrallah', 'ghazwan', 'samir'];
+const STAGE_SIZE = 5;
 const GOVERNORATES = ['damascus', 'rif-dimashq', 'aleppo', 'homs', 'hama', 'latakia', 'tartus', 'idlib', 'deir-ez-zor', 'raqqa', 'hasakah', 'daraa', 'sweida', 'quneitra'];
 const CHAR_SET = new Set(CHARACTERS);
 const GOV_SET = new Set(GOVERNORATES);
@@ -23,6 +32,8 @@ const BUCKET_SIZE = 800; // burst
 const REFILL_PER_SEC = 80; // sustained clicks/sec per IP
 const MAX_BODY = 4096;
 const BROADCAST_MS = 1000;
+const TZ_OFFSET_MS = 3 * 3600_000; // Syria is UTC+3 all year
+const WEEK_MS = 7 * 24 * 3600_000;
 
 /* ---------------- helpers ---------------- */
 
@@ -41,6 +52,15 @@ const json = (data, status, headers) =>
 async function hashIp(ip, salt) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(salt + '|' + ip));
   return [...new Uint8Array(buf).slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Next Friday 00:00 Damascus time strictly after `now` (ms). */
+export function nextRoundEnd(now) {
+  const local = new Date(now + TZ_OFFSET_MS);
+  const days = (5 - local.getUTCDay() + 7) % 7; // 5 = Friday
+  let end = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + days) - TZ_OFFSET_MS;
+  if (end <= now) end += WEEK_MS;
+  return end;
 }
 
 /** Parse + validate a flush body. Returns {items, n} or {error}. */
@@ -77,23 +97,37 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: h });
 
     const stub = env.COUNTER.getByName('global');
+    // X-Test-IP lets local tests simulate different visitors; ignored in production.
+    const visitor = () =>
+      hashIp((env.DEV === '1' && request.headers.get('X-Test-IP')) || request.headers.get('CF-Connecting-IP') || '0.0.0.0', env.IP_SALT || 'dev-salt');
 
     if (url.pathname === '/ws') {
       if (request.headers.get('Upgrade') !== 'websocket') return new Response('expected websocket', { status: 426 });
       return stub.fetch(request);
     }
 
-    if (url.pathname === '/totals' && request.method === 'GET') return json(await stub.totals(), 200, h);
+    if (url.pathname === '/totals' && request.method === 'GET') return json(await stub.totals(await visitor()), 200, h);
 
     if (url.pathname === '/flush' && request.method === 'POST') {
       const parsed = parseBatch(await request.text());
       if (parsed.error) return json({ error: parsed.error }, 400, h);
-      // Local testing only: simulate different visitors.
-      const ip = (env.DEV === '1' && request.headers.get('X-Test-IP')) || request.headers.get('CF-Connecting-IP') || '0.0.0.0';
-      const visitor = await hashIp(ip, env.IP_SALT || 'dev-salt');
-      const res = await stub.flush(visitor, parsed.items, parsed.n);
+      const res = await stub.flush(await visitor(), parsed.items, parsed.n);
       return json(res, res.accepted ? 200 : 429, h);
     }
+
+    if (url.pathname === '/vote' && request.method === 'POST') {
+      const text = await request.text();
+      let slug = null;
+      try {
+        if (text.length < 200) slug = JSON.parse(text)?.slug;
+      } catch {}
+      if (typeof slug !== 'string' || !CHAR_SET.has(slug)) return json({ error: 'bad_slug' }, 400, h);
+      const res = await stub.vote(await visitor(), slug);
+      return json(res, res.error ? 400 : 200, h);
+    }
+
+    // Local testing only: end the current round right now.
+    if (url.pathname === '/dev/roll' && request.method === 'POST' && env.DEV === '1') return json(await stub.forceRoll(), 200, h);
 
     return json({ error: 'not_found' }, 404, h);
   },
@@ -105,20 +139,146 @@ export class Counter extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.cache = null;
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS counters (k TEXT PRIMARY KEY, n INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS visitors (ip TEXT PRIMARY KEY, gov TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS buckets (ip TEXT PRIMARY KEY, tokens REAL NOT NULL, t INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS round_howls (slug TEXT PRIMARY KEY, n INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS votes (ip TEXT PRIMARY KEY, slug TEXT NOT NULL, t INTEGER NOT NULL);
       `);
+      this.loadRound();
+      // Make sure the round ends even if nobody is on the site at that moment.
+      if ((await ctx.storage.getAlarm()) == null) await ctx.storage.setAlarm(this.round.endsAt);
     });
-    this.cache = null;
   }
 
-  /** Build the totals object from storage (cached until the next write). */
-  async totals() {
-    if (this.cache) return this.cache;
-    const t = { total: 0, characters: {}, governorates: {}, matrix: {}, visitors: { total: 0, governorates: {} } };
+  /* ---------- rounds ---------- */
+
+  getMeta(k) {
+    const row = this.sql.exec('SELECT v FROM meta WHERE k = ?', k).toArray()[0];
+    return row ? JSON.parse(row.v) : null;
+  }
+
+  setMeta(k, v) {
+    this.sql.exec('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v', k, JSON.stringify(v));
+  }
+
+  /** Load (or create) the stage line-up and the current round. */
+  loadRound() {
+    const stage = (this.getMeta('stage') || INITIAL_STAGE).filter((s) => CHAR_SET.has(s));
+    // A character removed from CHARACTERS drops off stage; refill from the candidates.
+    for (const c of CHARACTERS) if (stage.length < STAGE_SIZE && !stage.includes(c)) stage.push(c);
+    this.stage = stage;
+    this.round = this.getMeta('round') || { id: 1, endsAt: nextRoundEnd(Date.now()) };
+    this.last = this.getMeta('last');
+    this.setMeta('stage', this.stage);
+    this.setMeta('round', this.round);
+  }
+
+  candidates() {
+    return CHARACTERS.filter((c) => !this.stage.includes(c));
+  }
+
+  /** End every round whose time has passed (normally at most one). */
+  maybeRoll(now = Date.now()) {
+    let rolled = false;
+    while (this.round.endsAt <= now) {
+      this.roll();
+      rolled = true;
+    }
+    if (rolled) this.cache = null;
+    return rolled;
+  }
+
+  roll() {
+    const cands = new Set(this.candidates());
+    const tally = this.sql
+      .exec('SELECT slug, COUNT(*) AS n FROM votes GROUP BY slug')
+      .toArray()
+      .filter((r) => cands.has(r.slug));
+    const top = Math.max(0, ...tally.map((r) => r.n));
+    let result = { round: this.round.id, endedAt: this.round.endsAt, winner: null, loser: null, votes: top };
+
+    if (top > 0) {
+      // Tie → whoever reached the top vote count first.
+      const tied = tally
+        .filter((r) => r.n === top)
+        .map((r) => ({ slug: r.slug, at: this.sql.exec('SELECT t FROM votes WHERE slug = ? ORDER BY t LIMIT 1 OFFSET ?', r.slug, top - 1).one().t }))
+        .sort((a, b) => a.at - b.at);
+      const winner = tied[0].slug;
+      // Loser = fewest howls this round; tie → fewer all-time howls; tie → later on stage.
+      const howls = Object.fromEntries(this.sql.exec('SELECT slug, n FROM round_howls').toArray().map((r) => [r.slug, r.n]));
+      const allTime = Object.fromEntries(
+        this.sql.exec("SELECT k, n FROM counters WHERE k LIKE 'c:%'").toArray().map((r) => [r.k.slice(2), r.n]),
+      );
+      const loser = this.stage
+        .map((slug, i) => ({ slug, i, r: howls[slug] || 0, a: allTime[slug] || 0 }))
+        .sort((x, y) => x.r - y.r || x.a - y.a || y.i - x.i)[0].slug;
+      this.stage[this.stage.indexOf(loser)] = winner;
+      result = { ...result, winner, loser };
+    }
+
+    this.sql.exec('DELETE FROM votes');
+    this.sql.exec('DELETE FROM round_howls');
+    // The Friday after the one that just ended (also re-aligns after a forced roll).
+    this.round = { id: this.round.id + 1, endsAt: nextRoundEnd(this.round.endsAt) };
+    this.last = result;
+    this.setMeta('stage', this.stage);
+    this.setMeta('round', this.round);
+    this.setMeta('last', this.last);
+  }
+
+  async forceRoll() {
+    this.round.endsAt = Date.now();
+    this.maybeRoll();
+    await this.scheduleBroadcast();
+    return { last: this.last, totals: await this.totals() };
+  }
+
+  /** One vote per IP per round; voting again just moves the vote. */
+  async vote(ip, slug) {
+    this.maybeRoll();
+    if (!this.candidates().includes(slug)) return { error: 'not_candidate' };
+    const prev = this.sql.exec('SELECT slug FROM votes WHERE ip = ?', ip).toArray()[0]?.slug;
+    if (prev !== slug) {
+      this.sql.exec(
+        'INSERT INTO votes (ip, slug, t) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET slug = excluded.slug, t = excluded.t',
+        ip,
+        slug,
+        Date.now(),
+      );
+      this.cache = null;
+      await this.scheduleBroadcast();
+    }
+    return { myVote: slug, totals: await this.totals(ip) };
+  }
+
+  /* ---------- totals ---------- */
+
+  /** Shared totals (cached until the next write), plus this visitor's vote if `ip` is given. */
+  async totals(ip) {
+    this.maybeRoll();
+    this.cache ||= this.buildTotals();
+    if (!ip) return this.cache;
+    const myVote = this.sql.exec('SELECT slug FROM votes WHERE ip = ?', ip).toArray()[0]?.slug || null;
+    return { ...this.cache, myVote };
+  }
+
+  buildTotals() {
+    const t = {
+      total: 0,
+      characters: {},
+      governorates: {},
+      matrix: {},
+      visitors: { total: 0, governorates: {} },
+      stage: [...this.stage],
+      candidates: this.candidates(),
+      round: { id: this.round.id, endsAt: this.round.endsAt, howls: {}, votes: {} },
+      last: this.last,
+    };
     for (const { k, n } of this.sql.exec('SELECT k, n FROM counters')) {
       const [kind, a, b] = k.split(':');
       if (kind === 'total') t.total = n;
@@ -130,19 +290,25 @@ export class Counter extends DurableObject {
       t.visitors.governorates[gov] = n;
       t.visitors.total += n;
     }
-    this.cache = t;
+    for (const { slug, n } of this.sql.exec('SELECT slug, n FROM round_howls')) t.round.howls[slug] = n;
+    for (const { slug, n } of this.sql.exec('SELECT slug, COUNT(*) AS n FROM votes GROUP BY slug')) t.round.votes[slug] = n;
     return t;
   }
+
+  /* ---------- clicks ---------- */
 
   /** One flush from one visitor (IP hash). All writes happen synchronously → atomic. */
   async flush(ip, items, n) {
     const now = Date.now();
+    this.maybeRoll(now);
     // token bucket per IP
     const row = this.sql.exec('SELECT tokens, t FROM buckets WHERE ip = ?', ip).toArray()[0];
     let tokens = row ? Math.min(BUCKET_SIZE, row.tokens + ((now - row.t) / 1000) * REFILL_PER_SEC) : BUCKET_SIZE;
     const allowed = Math.min(n, Math.floor(tokens));
-    if (allowed <= 0) {
+    const saveBucket = () =>
       this.sql.exec('INSERT INTO buckets (ip, tokens, t) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET tokens = excluded.tokens, t = excluded.t', ip, tokens, now);
+    if (allowed <= 0) {
+      saveBucket();
       return { accepted: 0, reason: 'rate_limited' };
     }
     tokens -= allowed;
@@ -150,34 +316,48 @@ export class Counter extends DurableObject {
     // Trim the batch to what the bucket allows (keeps order).
     let left = allowed;
     const bump = new Map();
-    const add = (k, v) => bump.set(k, (bump.get(k) || 0) + v);
+    const roundBump = new Map();
+    const add = (m, k, v) => m.set(k, (m.get(k) || 0) + v);
     let lastGov = null;
     for (const [gov, char, count] of items) {
       const c = Math.min(count, left);
       if (!c) break;
       left -= c;
-      add('total', c);
-      add(`c:${char}`, c);
-      add(`g:${gov}`, c);
-      add(`m:${gov}:${char}`, c);
+      add(bump, 'total', c);
+      add(bump, `c:${char}`, c);
+      add(bump, `g:${gov}`, c);
+      add(bump, `m:${gov}:${char}`, c);
+      add(roundBump, char, c);
       lastGov = gov;
     }
 
-    this.sql.exec('INSERT INTO buckets (ip, tokens, t) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET tokens = excluded.tokens, t = excluded.t', ip, tokens, now);
+    saveBucket();
     for (const [k, v] of bump) this.sql.exec('INSERT INTO counters (k, n) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET n = n + excluded.n', k, v);
+    for (const [k, v] of roundBump) this.sql.exec('INSERT INTO round_howls (slug, n) VALUES (?, ?) ON CONFLICT(slug) DO UPDATE SET n = n + excluded.n', k, v);
     // One IP = one visitor, counted in the governorate it howls from most recently.
-    this.sql.exec('INSERT INTO visitors (ip, gov, first_seen, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT(ip) DO UPDATE SET gov = excluded.gov, last_seen = excluded.last_seen', ip, lastGov, now, now);
+    this.sql.exec(
+      'INSERT INTO visitors (ip, gov, first_seen, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT(ip) DO UPDATE SET gov = excluded.gov, last_seen = excluded.last_seen',
+      ip,
+      lastGov,
+      now,
+      now,
+    );
 
     this.cache = null;
-    this.scheduleBroadcast();
+    await this.scheduleBroadcast();
     return { accepted: allowed, dropped: n - allowed, totals: await this.totals() };
   }
 
+  /* ---------- broadcast + round timer (one alarm does both) ---------- */
+
   async scheduleBroadcast() {
-    if ((await this.ctx.storage.getAlarm()) == null) await this.ctx.storage.setAlarm(Date.now() + BROADCAST_MS);
+    const want = Date.now() + BROADCAST_MS;
+    const cur = await this.ctx.storage.getAlarm();
+    if (cur == null || cur > want) await this.ctx.storage.setAlarm(want);
   }
 
   async alarm() {
+    this.maybeRoll();
     const msg = JSON.stringify(await this.totals());
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -186,9 +366,11 @@ export class Counter extends DurableObject {
     }
     // Housekeeping: forget buckets that are full again (idle > 10 s).
     this.sql.exec('DELETE FROM buckets WHERE t < ?', Date.now() - 10_000);
+    await this.ctx.storage.setAlarm(this.round.endsAt);
   }
 
-  /* WebSocket (Hibernation API) */
+  /* ---------- WebSocket (Hibernation API) ---------- */
+
   async fetch() {
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);

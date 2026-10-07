@@ -36,6 +36,8 @@ FACES = {
     "2.jpg": "nasrallah",
     "1.jpg": "samir",
     "3.jpg": "ghazwan",
+    "حافظ الاسد.jpg": "hafez",
+    "قاسم سليماني.jpg": "soleimani",
 }
 
 # Optional per-face tweaks (all in units of the detected face height `h`).
@@ -51,6 +53,8 @@ TUNING = {
     "nasrallah": {"top": 0.95, "chin": 1.36, "neck": 0.0, "width": 0.6},
     "samir": {"chin": 1.0, "neck": 0.08, "recenter": True},
     # beanie on top, full beard below
+    "hafez": {"chin": 1.1, "recenter": True},
+    "soleimani": {"chin": 1.15, "neck": 0.03},
     "ghazwan": {"top": 0.62, "chin": 1.2, "neck": 0.08, "width": 0.53, "keep_top": True, "hat_w": 0.44},
 }
 

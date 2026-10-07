@@ -56,6 +56,14 @@
     </div>
   </section>
 
+  <dialog class="modal modal--vote" id="vote-modal" aria-label="التصويت">
+    <button type="button" class="modal__x" data-close aria-label="سكّر">✕</button>
+    <p class="vote__timer"><span aria-hidden="true">⏳</span> <span id="vote-timer"></span></p>
+    <div class="vote__grid" id="vote-grid"></div>
+    <div class="vote__stage" id="vote-stage" aria-label="عوايات هالأسبوع"></div>
+    <p class="vote__last" id="vote-last" hidden></p>
+  </dialog>
+
   <dialog class="modal" id="gov-modal" aria-label="المحافظة">
     <p class="modal__icon" aria-hidden="true">📍</p>
     <div class="gov-grid" id="gov-grid"></div>
